@@ -1,4 +1,5 @@
 import http from 'node:http';
+import { inspectVersions } from './doctor.mjs';
 import { spawn } from 'node:child_process';
 import { timingSafeEqual } from 'node:crypto';
 import { existsSync } from 'node:fs';
@@ -31,10 +32,23 @@ async function body(req) {
   return JSON.parse(data);
 }
 
-async function probe(port, key) {
+async function probe(config) {
+  const checks = await inspectVersions(config);
+  const daemon = checks.find((check) => check.name === 'Native Codex daemon')?.detail;
+  const version = daemon?.runningVersion || daemon?.selectedVersion;
+  if (typeof version !== 'string' || !/^\d+\.\d+\.\d+(?:[-+][a-zA-Z0-9.-]+)?$/.test(version))
+    throw new Error('Model catalog probe requires a detectable native Codex version');
+  const { router: port } = config.ports;
+  const key = config.clientApiKey;
   return new Promise((resolve, reject) => {
     const req = http.get(
-      { host: '127.0.0.1', port, path: '/models', headers: { 'x-api-key': key }, timeout: 30000 },
+      {
+        host: '127.0.0.1',
+        port,
+        path: `/models?client_version=${encodeURIComponent(version)}`,
+        headers: { 'x-api-key': key },
+        timeout: 30000,
+      },
       (res) => {
         let data = '';
         res.on('data', (chunk) => {
@@ -271,7 +285,7 @@ export async function startServer(config) {
           return json(res, (await drain(request.timeoutMs ?? 30000)) ? 200 : 409, status());
         }
         if (request.action === 'probe') {
-          return json(res, 200, await probe(config.ports.router, config.clientApiKey));
+          return json(res, 200, await probe(config));
         }
         if (request.action === 'pause') {
           if (!maintenance() || reloading)
@@ -311,8 +325,14 @@ export async function startServer(config) {
         } finally {
           reloading = false;
         }
-      } catch {
-        return json(res, 500, { error: 'Control operation failed' });
+      } catch (error) {
+        const safeMessage =
+          /^(Router probe returned \d{3}|Invalid router catalog|Router probe timed out|Model catalog probe requires a detectable native Codex version)$/.test(
+            error.message,
+          )
+            ? error.message
+            : 'Control operation failed';
+        return json(res, 500, { error: safeMessage });
       }
     }
     if (maintenance() || !ready || closing)

@@ -1,3 +1,4 @@
+import { formatUsage } from './usage.mjs';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -224,7 +225,7 @@ async function configureTailscale(target, info, clientRoot, serverRoot, mode) {
   }
 }
 
-export async function install(clientRoot = defaultClientRoot()) {
+export async function install(clientRoot = defaultClientRoot(), options = {}) {
   p.intro('Codex Multi Auth · Einrichtung');
   const existingClient = await readJson(path.join(clientRoot, 'client.json'), null);
   if (existingClient?.pending) return resume(clientRoot);
@@ -236,9 +237,11 @@ export async function install(clientRoot = defaultClientRoot()) {
     throw new Error(
       'Nutze macOS, Linux oder WSL2. Native Windows-Dienste sind nicht implementiert.',
     );
-  const localHome = process.env.CODEX_HOME
-    ? path.resolve(process.env.CODEX_HOME)
-    : path.join(os.homedir(), '.codex');
+  const localHome =
+    options.codexHome ??
+    (process.env.CODEX_HOME
+      ? path.resolve(process.env.CODEX_HOME)
+      : path.join(os.homedir(), '.codex'));
   const backup = await backupFiles(
     clientRoot,
     [
@@ -250,14 +253,16 @@ export async function install(clientRoot = defaultClientRoot()) {
     'installation preflight',
   );
   p.log.info(`Konfiguration gesichert: ${backup}`);
-  const mode = await select(
-    'Wo soll der Account-Proxy laufen?',
-    [
-      { value: 'local', label: 'Lokal auf diesem Computer' },
-      { value: 'ssh', label: 'Auf NAS / Server per SSH' },
-    ],
-    'local',
-  );
+  const mode = options.pool
+    ? 'local'
+    : await select(
+        'Wo soll der Account-Proxy laufen?',
+        [
+          { value: 'local', label: 'Lokal auf diesem Computer' },
+          { value: 'ssh', label: 'Auf NAS / Server per SSH' },
+        ],
+        'local',
+      );
   const ssh = mode === 'ssh' ? await askSsh() : null;
   const target = new Target({ mode, ssh });
   if (mode === 'ssh') {
@@ -268,7 +273,7 @@ export async function install(clientRoot = defaultClientRoot()) {
     await target.trust();
   }
   const info = await busy('Zielsystem prüfen', () => target.inspect());
-  const root = await askLocation(info.home);
+  const root = options.serverRoot ?? (await askLocation(info.home));
   if (await target.exists(path.join(root, 'config.json')))
     throw new Error(
       'Dieser Server ist bereits eingerichtet. Nutze „connect“, um einen weiteren Computer zu verbinden.',
@@ -316,7 +321,9 @@ export async function install(clientRoot = defaultClientRoot()) {
       'Ein systemd-Benutzerdienst benötigt einen laufenden User-Manager.\nFür Betrieb nach Logout: „sudo loginctl enable-linger <Benutzer>“.',
       'Linux-Benutzerdienst',
     );
-  const desktop = await confirm('Codex Desktop auf diesem Computer mit dem Proxy verbinden?', true);
+  const desktop = options.pool
+    ? true
+    : await confirm('Codex Desktop auf diesem Computer mit dem Proxy verbinden?', true);
   let ports = await choosePorts();
   p.note(
     `Ziel: ${mode === 'ssh' ? ssh.host : 'dieser Computer'}\nOrdner: ${root}\nAccounts: ${strategy === 'sequential' ? 'Sequenziell' : 'Hybrid'}\nAutomatische Updates: ${updates.enabled ? `alle ${updates.intervalHours} h` : 'aus'}\nProxy-Wartezeit: ${updates.delayHours} h\nDesktop: ${desktop ? `127.0.0.1:${ports.client}` : 'unverändert'}`,
@@ -343,7 +350,7 @@ export async function install(clientRoot = defaultClientRoot()) {
     ports,
     systemService,
     serviceUser: info.username,
-    codexHome: path.join(info.home, '.codex'),
+    codexHome: options.pool ? path.join(root, 'cli-home') : path.join(info.home, '.codex'),
     clientApiKey: crypto.randomBytes(32).toString('hex'),
   };
   target.config = config;
@@ -377,14 +384,46 @@ export async function install(clientRoot = defaultClientRoot()) {
   return finishOnboarding(client, target);
 }
 
+export async function chooseLogin(args = []) {
+  const device = args.includes('--device-auth');
+  const browser = args.includes('--browser-auth');
+  if (device && browser) throw new Error('Nur --device-auth ODER --browser-auth angeben.');
+  let loginMethod = device ? 'device' : browser ? 'browser' : undefined;
+  if (!loginMethod) {
+    if (!process.stdin.isTTY)
+      throw new Error(
+        'Anmeldemethode wählen: --device-auth oder --browser-auth (oder interaktiv im Terminal starten).',
+      );
+    loginMethod = await select('Wie möchtest du den Account anmelden?', [
+      {
+        value: 'browser',
+        label: 'Standard-Flow im Browser',
+        hint: 'OAuth mit lokaler Callback-Weiterleitung',
+      },
+      {
+        value: 'device',
+        label: 'Device-Code',
+        hint: 'Link öffnen und Gerätecode eingeben; auch für SSH',
+      },
+    ]);
+  }
+  p.note(
+    loginMethod === 'device'
+      ? 'Link öffnen und Gerätecode eingeben. Bei jedem Account den gewünschten Account wählen.'
+      : 'Standard-Browser-Anmeldung mit Callback auf dem Proxy-Rechner. Bei SSH muss der Callback vom Browser erreichbar sein; alternativ Device-Code wählen.',
+    loginMethod === 'device' ? 'Device-Code-Anmeldung' : 'Standard-Browser-Anmeldung',
+  );
+  return {
+    loginMethod,
+    args: args.filter((arg) => !['--device-auth', '--browser-auth'].includes(arg)),
+  };
+}
+
 async function finishOnboarding(client, target) {
   let add = await confirm('Jetzt einen Account anmelden?', true);
   while (add) {
-    p.note(
-      'Der offizielle Proxy-Login zeigt einen Link und Gerätecode.\nIm Browser mit dem gewünschten Account anmelden; bei jedem weiteren Account den richtigen Login wählen.',
-      'codex-multi-auth login --device-auth --preserve-selection',
-    );
-    await target.worker('accounts', { command: 'add' }, { interactive: true });
+    const login = await chooseLogin();
+    await target.worker('accounts', { command: 'add', ...login }, { interactive: true });
     add = await confirm('Weiteren Account hinzufügen?', false);
   }
   if (
@@ -623,6 +662,17 @@ export async function configure(clientRoot = defaultClientRoot(), requested) {
 
 export async function accountAction(clientRoot, command, args = []) {
   const client = await loadClient(clientRoot);
+  if (command === 'usage') {
+    if (args.some((arg) => arg !== '--json'))
+      throw new Error('usage: only --json is supported; this command never redeems resets');
+    const report = jsonResult(await new Target(client).worker('usage-summary'));
+    process.stdout.write(
+      args.includes('--json') ? JSON.stringify(report, null, 2) + '\n' : formatUsage(report),
+    );
+    return;
+  }
+  const login = command === 'add' ? await chooseLogin(args) : {};
+  if (command === 'add') args = login.args;
   if (command === 'remove')
     p.note(
       'Der offizielle Proxy unterstützt keinen direkten „remove“-Unterbefehl.\nEs öffnet sich sein Account-Manager: Account auswählen, dann Löschen (D).',
@@ -633,7 +683,7 @@ export async function accountAction(clientRoot, command, args = []) {
       'Der Proxy pausiert für die Dauer der Account-Verwaltung.\nLaufende Anfragen dürfen vorher fertig werden.',
       'Account-Dateien schützen',
     );
-  const reference = `codex-multi-auth ${command === 'add' ? 'login --device-auth --preserve-selection' : command === 'remove' ? 'login' : command === 'stats' ? 'status' : command === 'proxy' ? '(Proxy-Befehl)' : command}`;
+  const reference = `codex-multi-auth ${command === 'add' ? `login ${login.loginMethod === 'device' ? '--device-auth ' : ''}--preserve-selection` : command === 'remove' ? 'login' : command === 'stats' ? 'status' : command === 'proxy' ? '(Proxy-Befehl)' : command}`;
   const structured =
     args.includes('--json') &&
     (['stats', 'list', 'usage'].includes(command) ||
@@ -659,7 +709,7 @@ export async function accountAction(clientRoot, command, args = []) {
     return;
   }
   p.log.info(`Weiterleitung an ${reference}.`);
-  await new Target(client).worker('accounts', { command, args }, { interactive: true });
+  await new Target(client).worker('accounts', { command, args, ...login }, { interactive: true });
 }
 
 export async function updatesAction(clientRoot, action) {

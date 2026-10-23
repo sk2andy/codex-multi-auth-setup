@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import {
+  chmod,
   mkdtemp,
   mkdir,
   readFile,
@@ -75,7 +76,7 @@ if (version === '1.1.0') writeFileSync(${JSON.stringify(tokenFile)}, JSON.string
 const server = http.createServer((req, res) => {
   if (req.headers['x-api-key'] !== state.clientApiKey) { res.writeHead(401); res.end(); return; }
   if (req.url === '/__setup_router_ready__') { res.writeHead(404); res.end(); return; }
-  if (req.url === '/models') { res.end(JSON.stringify({data: version==='1.1.0' && ${Boolean(failCatalog)} ? [] : [{id:'test-model'}]})); return; }
+  if (req.url === '/models?client_version=0.164.0') { res.end(JSON.stringify({data: version==='1.1.0' && ${Boolean(failCatalog)} ? [] : [{id:'test-model'}]})); return; }
   if (req.url === '/stream') { res.write('first'); setTimeout(() => res.end('last'), 300); return; }
   res.end(JSON.stringify({version,pid:process.pid}));
 });
@@ -86,6 +87,15 @@ process.on('SIGTERM', () => server.close(() => process.exit(0)));
   }
   await symlink(packages[0], path.join(root, 'current-proxy'));
   await writeFile(path.join(root, 'config.json'), JSON.stringify(config));
+  const bin = path.join(config.codexHome, 'packages', 'app-server-daemon', 'current', 'bin');
+  await mkdir(bin, { recursive: true });
+  await writeFile(
+    path.join(bin, 'codex'),
+    `#!${process.execPath}
+console.log(JSON.stringify({status:'running',appServerVersion:'0.164.0'}));
+`,
+  );
+  await chmod(path.join(bin, 'codex'), 0o700);
   const runtime = await startServer(config);
   t.after(async () => {
     await runtime.close();

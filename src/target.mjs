@@ -157,6 +157,22 @@ export class Target {
     return (await this.run('test', ['-e', filename], { check: false })).code === 0;
   }
   async worker(action, payload = {}, { interactive = false } = {}) {
+    // Pools retain their own manager version. Resolve login transport here so an
+    // older worker cannot ignore loginMethod and silently force device auth.
+    if (action === 'accounts' && payload.command === 'add' && payload.loginMethod) {
+      if (!['browser', 'device'].includes(payload.loginMethod))
+        throw new Error('Unknown login method');
+      payload = {
+        ...payload,
+        command: 'proxy',
+        args: [
+          'login',
+          ...(payload.loginMethod === 'device' ? ['--device-auth'] : []),
+          '--preserve-selection',
+          ...(payload.args ?? []),
+        ],
+      };
+    }
     const args = [
       path.join(this.config.appDir, 'src', 'worker.mjs'),
       action,

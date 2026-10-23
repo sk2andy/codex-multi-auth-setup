@@ -6,3 +6,14 @@ coverage/
 .env
 *.log
 task/
+
+# Machine-local setup records and credentials must never be published.
+MAC-MIGRATION.md
+LOCAL-SETUP.md
+*-local.mjs
+client.json
+baseline.json
+fork-migration.json
+verification.json
+auth.json
+openai-codex-accounts.json*

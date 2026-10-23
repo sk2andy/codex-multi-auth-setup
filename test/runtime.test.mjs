@@ -39,8 +39,10 @@ import { readFileSync, writeFileSync } from 'node:fs';
 const state = JSON.parse(readFileSync(process.argv[process.argv.indexOf('--state') + 1]));
 const server = http.createServer((req, res) => {
   if (req.headers['x-api-key'] !== state.clientApiKey) { res.writeHead(401); res.end(); return; }
+  if (req.url.startsWith('/models')) writeFileSync(state.statusPath + '.catalog-request', req.url);
+  if (req.url.startsWith('/models?') && req.url !== '/models?client_version=0.164.0') { res.writeHead(400); res.end(); return; }
   if (req.url === '/__setup_router_ready__') { res.writeHead(404); res.end(); return; }
-  if (req.url === '/models') { res.end(JSON.stringify({data:[{id:'test-model'}]})); return; }
+  if (req.url === '/models' || req.url === '/models?client_version=0.164.0') { res.end(JSON.stringify({data:[{id:'test-model'}]})); return; }
   if (req.url === '/stream') {
     res.writeHead(200, {'content-type':'text/event-stream'});
     res.write('data: first\\n\\n');
@@ -56,6 +58,15 @@ server.listen(state.port, '127.0.0.1', () => writeFileSync(state.statusPath, JSO
 process.on('SIGTERM', () => server.close(() => process.exit(0)));
 `,
   );
+  const bin = path.join(root, 'current-cli', 'bin');
+  await mkdir(bin, { recursive: true });
+  await writeFile(
+    path.join(bin, 'codex'),
+    `#!${process.execPath}
+console.log(JSON.stringify({status:'running',appServerVersion:'0.164.0',managedCodexVersion:'0.163.0'}));
+`,
+  );
+  await chmod(path.join(bin, 'codex'), 0o700);
   const runtime = await startServer(config);
   t.after(async () => {
     await runtime.close();
@@ -110,6 +121,10 @@ test('owned readiness, isolated child state, key injection, and protected contro
     modelCount: 1,
     models: ['test-model'],
   });
+  assert.equal(
+    await readFile(path.join(root, 'router-status.json.catalog-request'), 'utf8'),
+    '/models?client_version=0.164.0',
+  );
   const state = JSON.parse(await readFile(path.join(root, 'router-state.json')));
   assert.equal(state.nativeOpenai, true);
   assert.equal(state.host, '127.0.0.1');
@@ -303,4 +318,14 @@ process.on('SIGTERM', () => { for (const socket of sockets) socket.destroy(); se
   ]);
   await forwarder.close();
   assert.throws(() => process.kill(nextPid, 0), { code: 'ESRCH' });
+});
+
+test('catalog probe reports missing client version instead of issuing an unversioned request', async (t) => {
+  const { root, control } = await fixture(t);
+  await rm(path.join(root, 'current-cli'), { recursive: true });
+  const response = await control('probe');
+  assert.equal(response.status, 500);
+  assert.deepEqual(await response.json(), {
+    error: 'Model catalog probe requires a detectable native Codex version',
+  });
 });

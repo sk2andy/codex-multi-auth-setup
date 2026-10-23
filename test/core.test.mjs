@@ -10,6 +10,7 @@ import { setDesktopEndpoint, validHost, validateConfig, atomicJson } from '../sr
 import { Target, sshArguments } from '../src/target.mjs';
 import { backupFiles } from '../src/backup.mjs';
 import { accountArguments, dispatch } from '../src/worker.mjs';
+import { chooseLogin } from '../src/installer.mjs';
 
 async function temporary(t) {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-core-'));
@@ -183,6 +184,16 @@ test('Account helpers delegate official upstream commands, including removal man
     '--device-auth',
     '--preserve-selection',
   ]);
+  assert.deepEqual(accountArguments({ command: 'add', loginMethod: 'browser' }), [
+    'login',
+    '--preserve-selection',
+  ]);
+  assert.deepEqual(accountArguments({ command: 'add', loginMethod: 'device' }), [
+    'login',
+    '--device-auth',
+    '--preserve-selection',
+  ]);
+  assert.throws(() => accountArguments({ command: 'add', loginMethod: 'invalid' }), /login method/);
   assert.deepEqual(accountArguments({ command: 'remove' }), ['login']);
   assert.deepEqual(accountArguments({ command: 'proxy', args: ['usage', '--help'] }), [
     'usage',
@@ -275,4 +286,43 @@ test('Output-limited child cannot hang indefinitely by ignoring SIGTERM', async 
     /time\/output limit/,
   );
   assert.ok(Date.now() - started < 5000);
+});
+
+test('login choice accepts either explicit method, strips wrapper flags and rejects conflicting choices', async () => {
+  assert.deepEqual(await chooseLogin(['--browser-auth', '--help']), {
+    loginMethod: 'browser',
+    args: ['--help'],
+  });
+  assert.deepEqual(await chooseLogin(['--device-auth']), { loginMethod: 'device', args: [] });
+  await assert.rejects(chooseLogin(['--browser-auth', '--device-auth']), /ODER/);
+  if (!process.stdin.isTTY) await assert.rejects(chooseLogin(), /Anmeldemethode wählen/);
+});
+
+test('login method is resolved before transport to legacy per-pool workers', async () => {
+  const target = new Target({
+    mode: 'local',
+    node: process.execPath,
+    root: '/tmp/pool',
+    appDir: '/tmp/manager',
+  });
+  const calls = [];
+  target.run = async (_node, args, options) => {
+    calls.push({ args, options });
+    return {};
+  };
+  for (const interactive of [true, false]) {
+    for (const loginMethod of ['browser', 'device']) {
+      await target.worker('accounts', { command: 'add', loginMethod, args: [] }, { interactive });
+      const call = calls.at(-1);
+      const payload = JSON.parse(
+        interactive ? Buffer.from(call.args.at(-1), 'base64url').toString() : call.options.input,
+      );
+      assert.equal(payload.command, 'proxy');
+      assert.deepEqual(payload.args, [
+        'login',
+        ...(loginMethod === 'device' ? ['--device-auth'] : []),
+        '--preserve-selection',
+      ]);
+    }
+  }
 });

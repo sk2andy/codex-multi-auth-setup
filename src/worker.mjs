@@ -44,10 +44,14 @@ export function accountArguments(payload) {
       payload.args.some((value) => typeof value !== 'string' || value.includes('\0')))
   )
     throw new Error('Proxy arguments must be strings without NUL characters');
+  if (payload.loginMethod !== undefined && !['device', 'browser'].includes(payload.loginMethod))
+    throw new Error('Unknown login method');
+  const base =
+    payload.command === 'add' && payload.loginMethod === 'browser'
+      ? ['login', '--preserve-selection']
+      : accountCommands[payload.command];
   const args =
-    payload.command === 'proxy'
-      ? (payload.args ?? [])
-      : [...accountCommands[payload.command], ...(payload.args ?? [])];
+    payload.command === 'proxy' ? (payload.args ?? []) : [...base, ...(payload.args ?? [])];
   if (!args.length) throw new Error('Missing upstream proxy command');
   return args;
 }
@@ -60,8 +64,19 @@ async function control(config, action, timeoutMs = 30_000) {
     signal: AbortSignal.timeout(timeoutMs + 5000),
   });
   if (!response.ok) {
+    let detail = '';
+    if (action === 'probe') {
+      const report = await response.json().catch(() => null);
+      if (
+        typeof report?.error === 'string' &&
+        /^(Router probe returned \d{3}|Invalid router catalog|Router probe timed out|Model catalog probe requires a detectable native Codex version)$/.test(
+          report.error,
+        )
+      )
+        detail = `: ${report.error}`;
+    }
     const error = new Error(
-      `Runtime control ${action} returned ${response.status}; existing requests may still be active`,
+      `Runtime control ${action} returned ${response.status}${action === 'drain' ? '; requests may not have drained' : ''}${detail}`,
     );
     error.httpStatus = response.status;
     throw error;
@@ -319,6 +334,20 @@ export async function dispatch(action, root, payload = {}) {
   if (action === 'read') return publicConfig(config);
   if (action === 'resume') return initializeInternal(config, { resume: true });
   if (action === 'recover') return recover(config, payload);
+  if (action === 'usage-summary') {
+    return maintenance(config, 'read-only usage and bank-reset details', async () => {
+      const result = await run(
+        config.node,
+        [path.join(config.appDir, 'src/usage-reader.mjs'), root],
+        {
+          env: managementEnvironment(config),
+          cwd: root,
+          timeoutMs: 120000,
+        },
+      );
+      return JSON.parse(result.stdout);
+    });
+  }
   if (action === 'accounts') {
     const args = accountArguments(payload);
     const commandName = /^[a-z][a-z-]*$/.test(args[0]) ? args[0] : '(custom command)';

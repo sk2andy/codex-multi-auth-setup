@@ -91,6 +91,11 @@ console.log(JSON.stringify({args:process.argv.slice(2),pool:process.env.CODEX_MU
     '--device-auth',
     '--preserve-selection',
   ]);
+  const browser = JSON.parse(
+    (await worker('accounts', { command: 'add', loginMethod: 'browser', interactive: false }))
+      .stdout,
+  );
+  assert.deepEqual(JSON.parse(browser.stdout).args, ['login', '--preserve-selection']);
   assert.equal(
     JSON.parse(await readFile(path.join(root, 'data/multi-auth/test-account.json'))).scope,
     path.join(root, 'data/codex'),

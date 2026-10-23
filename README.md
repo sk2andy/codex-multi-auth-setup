@@ -27,7 +27,7 @@ The wizard asks for:
 4. **Account selection:** sequential or hybrid. Upstream currently has no pure round-robin mode; hybrid means health/quota-aware selection, not round robin.
 5. **Optional automatic updates**, check interval, and proxy release age. Default: at least **48 hours** old; configurable from 0 to 8760 hours. The same rule applies to the first installation.
 6. **Optional managed Codex CLI.** Its stable releases have no additional age delay. Existing system/npm/Homebrew installations are left in place. A backed-up `~/.local/bin/codex` link is an explicit additional choice.
-7. **Account onboarding**, using the official device-login command. Add one or multiple accounts locally or over SSH; no callback-port forwarding required.
+7. **Account onboarding**, with a choice of standard browser OAuth or device-code login. Add one or multiple accounts locally or over SSH; no callback-port forwarding required.
 8. **Desktop configuration.** After a successful connection test, the wizard backs up and changes the local `openai_base_url` while preserving unrelated TOML and comments.
 
 When prompted at the end, **fully quit Codex Desktop and reopen it**. Then send a small request. Changing only the server's hostname/IP later normally needs no Desktop restart because the local endpoint stays the same.
@@ -85,7 +85,7 @@ Use `codex-ma-setup configure` for settings owned by this installer, such as SSH
 | `codex-ma-setup install`                | New local/SSH installation                                                        |
 | `codex-ma-setup connect`                | Connect another computer to an existing SSH installation                          |
 | `codex-ma-setup configure`              | Change SSH address/fallback/key, strategy, Tailscale, updates, or Desktop binding |
-| `codex-ma-setup accounts add`           | `codex-multi-auth login --device-auth --preserve-selection`                       |
+| `codex-ma-setup accounts add`           | Choose browser or device-code login; always preserves account selection           |
 | `codex-ma-setup accounts list`          | `codex-multi-auth list`                                                           |
 | `codex-ma-setup stats`                  | `codex-multi-auth status`                                                         |
 | `codex-ma-setup accounts usage`         | `codex-multi-auth usage`                                                          |
@@ -199,3 +199,156 @@ Tests use temporary homes, fake upstream processes, real loopback HTTP/streaming
 This helper installs and manages its own deployment. It does not automatically migrate an arbitrary existing multi-auth installation, alter NAS-wide SSH policy, update Node/nginx/OS packages on a schedule, publish credentials, or share account pools through GitHub. Use fresh device sign-ins for the new pool.
 
 MIT licensed. Upstream `codex-multi-auth` remains separately maintained under its own license.
+
+## Isolated account pools (local)
+
+Pools reuse the existing supervised proxy, account manager and hybrid usage-aware
+scheduler. Each pool has its own credential store, runtime, ports, services,
+configuration, MCP/plugin settings and CLI history. There is **no cross-pool
+fallback**. Choose **Hybrid** in each setup dialog for usage-aware switching.
+Existing non-pool installations remain supported and are not migrated implicitly.
+
+```sh
+npm start -- pools create personal --seed-from /Users/you/.codex
+npm start -- pools create work
+npm start -- --pool personal accounts add
+npm start -- --pool work accounts add
+npm start -- pools list
+npm start -- pools default personal
+npm start -- pools run work -- "Explain this repository"
+# Equivalent pool-aware CLI command:
+npm start -- --pool work codex -- "Explain this repository"
+npm start -- --pool work stats
+npm start -- --pool work doctor
+```
+
+Pool CLI launches use a dedicated Responses provider pointed at the selected
+pool's local proxy. Authentication stays with the proxy's account pool; an empty
+CLI home does not require a separate ChatGPT login. These provider settings apply
+only to the launched process and do not rewrite desktop configuration or auth.
+
+Each launch prints the selected pool and proxy endpoint to stderr. Inside Codex,
+`/status` identifies the provider as `codex_pool_<name>` (display name:
+`Codex pool: <name>`). The launch banner shows its endpoint.
+This identifies the pool, not the rotating account selected by the proxy. Existing
+sessions must be restarted to pick up the label. Explicit Codex `-c` overrides
+can replace launch settings; `/status` is the authoritative check in that case.
+
+Run setup commands in a terminal. Select distinct available ports when prompted.
+`pools run` uses a locally installed `codex` executable on PATH; installing the
+managed CLI is optional. Do not log out or replace the desktop login. Add every
+additional model account through `--pool NAME accounts add`; copying auth.json
+only seeds the client login, it does not enroll accounts in the proxy store.
+
+`--seed-from` is optional and takes a **stopped, reviewed Codex home snapshot**.
+It copies config.toml, auth.json, history.jsonl, sessions, skills and plugins into
+a new private pool home, never into an existing home. Symlinks are refused. Live
+SQLite databases, sockets, caches and external credential/keychain stores are not
+copied; this is not a complete app backup or plugin credential migration. Close
+Codex before taking the snapshot. Copies are independent after creation, not
+ongoing synchronization. If a seed fails, preserve/rename its partial home before
+retrying; it is never silently overwritten. Do not seed personal information into
+a work pool unless intended.
+
+The default selection redirects the **existing desktop home's model endpoint**
+after probing the selected pool. It preserves app auth, history and tool settings.
+Restart the app afterwards. It does **not** switch desktop history/config to the
+pool's CLI home: separate full environments are selected with `pools run`. Dot or
+mobile only use this selection when their requests actually pass through this
+local endpoint; cloud execution is not covered. Accounts within one pool share
+the context/tools of its calling client, not the individual accounts' cloud histories.
+
+Without `--pool`, management commands use the chosen default; without a default,
+legacy behavior is unchanged. `install` and `connect` remain legacy commands;
+create isolated pools with `pools create`. An interrupted setup can be continued
+with `--pool NAME resume`. Pool state lives under the selected `--client-root` in
+`pools/NAME/{client,server,codex}`. Pool creation never redirects the existing
+`.codex` desktop home; choosing the default is a separate explicit command.
+
+### Rollback
+
+`pools default NAME` prints the desktop backup directory; keep it. To disconnect,
+close the app and restore **only config.toml** from that backup (consult its
+manifest for the original path). Do not restore old auth tokens over refreshed
+ones. Run `pools clear-default` to clear CLI default selection; this deliberately
+leaves the desktop endpoint unchanged. You can instead select another ready pool
+with `pools default OTHER`. Service names are hashed from installation roots, so
+pools do not replace each other's services. Disable the particular pool's services
+using the existing platform service tooling before archiving its directory;
+never delete a running pool or its credentials blindly.
+
+### Interactive pool dashboard
+
+Run `codex-ma-setup` or `codex-ma-setup dashboard` for the interactive pool menu
+(`codex-ma-setup pools` is equivalent). It lists named pools and an existing
+legacy installation separately. Choose a pool, then add/list/remove accounts,
+open its upstream account dashboard, configure its usage-aware routing, run
+diagnostics, choose it as the desktop default, or start its isolated CLI.
+Interrupted setups are marked and can be resumed. Account assignment is done by
+signing into the selected pool; accounts are never silently moved or copied
+between credential stores. To move an account, first sign it into the destination
+pool, verify it there, then remove it from the source pool if desired.
+The interactive account dashboard pauses only the selected proxy until you exit.
+The pool overview itself does not touch credentials or stop running services.
+
+### Name an existing installation without moving tokens
+
+`codex-ma-setup pools adopt work` registers the existing installation under a
+pool name without relocating credentials, changing its Codex home, copying tokens
+or restarting its services. Then use `codex-ma-setup pools default work` to make
+it the desktop default. This is also available from the existing-installation
+entry in the interactive dashboard. The adopted pool retains the original home
+and history; any additional pools use their own homes. Only one name may adopt
+the original installation, and an existing named pool cannot be overwritten.
+
+### Read-only usage, bank resets and expiry times
+
+`codex-ma-setup --pool work usage` (or `accounts usage`) reads the native Codex
+usage snapshot for every account in the selected pool. `--json` returns the same
+allowlisted report for scripts. The interactive pool dashboard also offers
+**Usage / Bank Resets mit Ablaufzeiten (nur lesen)**.
+
+Bank resets are the earned `rateLimitResetCredits` entries in the native protocol,
+not purchased balance credits. The report shows their available count and each
+provided expiry timestamp with local date, exact time and timezone. Missing,
+zero and capped/partial detail lists are distinguished; absence of details does
+not mean zero. Opaque credit IDs and authentication fields are not printed.
+The read RPC requests detail rows explicitly. It cannot call the consume RPC,
+redeem a credit, change account selection, or enable automatic redemption.
+The proxy pauses briefly while native usage is read, then resumes. Expired auth
+may be refreshed in the pool store without changing the desktop login.
+This reader currently requires the compatible native-usage modules shipped by
+the underlying proxy. Unavailable data is reported as unknown, never zero.
+
+### Choose the account login flow
+
+`codex-ma-setup accounts add` asks which method to use every time, including
+onboarding and the pool menu. Choose **Standard browser flow** (OAuth callback)
+or **Device code**. For explicit/noninteractive selection:
+
+```sh
+codex-ma-setup --pool work accounts add --browser-auth
+codex-ma-setup --pool work accounts add --device-auth
+```
+
+The standard flow runs upstream `login --preserve-selection`; device login adds
+`--device-auth`. With SSH, the browser must reach the callback on the proxy host;
+choose device code if callback forwarding is unavailable. Cancelling the selection
+does not pause the proxy or start a login.
+
+### Choosing a pool's CLI home
+
+Use the pool menu's **Codex-Home anzeigen / ändern**, or:
+
+```sh
+codex-ma-setup pools home work                 # show current home
+codex-ma-setup pools home work isolated        # pools/work/codex
+codex-ma-setup pools home work /absolute/path  # custom or existing home
+```
+
+This setting controls the local CLI home, including SSH-backed pools. It does not
+move or delete the previous home, copy history/settings, change proxy accounts,
+or change the Desktop default. New empty homes authenticate through the pool
+proxy without a separate login. Restart existing CLI/ACP sessions to use the new
+home. For an explicit settings/history snapshot, `pools create --seed-from` is
+available when creating a pool; live SQLite databases must not be copied.
